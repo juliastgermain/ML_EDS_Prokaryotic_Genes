@@ -1,71 +1,74 @@
-from datasets import load_dataset
-import numpy as np
+import os, re
 import pandas as pd
+from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 
-# Load the dataset
-rpob_bac_seq_dna = load_dataset("tattabio/rpob_bac_dna_phylogeny_sequences")
-rpob_arch_seq_dna = load_dataset("tattabio/rpob_arch_dna_phylogeny_sequences")
+def clean_id(full_id):
+    if not full_id: return ""
+    match = re.search(r'([A-Z]{2}_GC[AF]_\d{9}\.\d+)', str(full_id))
+    return match.group(1) if match else str(full_id).split('_')[0]
 
-rpob_bac_seq_pro = load_dataset("tattabio/rpob_bac_phylogeny_sequences")
-rpob_arch_seq_pro = load_dataset("tattabio/rpob_arch_phylogeny_sequences")
+def get_pair_type(id1, id2):
+    if id1 in arc_ids and id2 in arc_ids: return 'arc-arc'
+    if id1 in bac_ids and id2 in bac_ids: return 'bac-bac'
+    return 'arc-bac'
 
-dist = load_dataset("tattabio/rpob_phylogeny_distances")
+# 1. Load
+dna_bac = load_dataset("tattabio/rpob_bac_dna_phylogeny_sequences", split='train')
+dna_arc = load_dataset("tattabio/rpob_arch_dna_phylogeny_sequences", split='train')
+pro_bac = load_dataset("tattabio/rpob_bac_phylogeny_sequences",      split='train')
+pro_arc = load_dataset("tattabio/rpob_arch_phylogeny_sequences",     split='train')
+dist_bac = load_dataset("tattabio/rpob_bac_dna_phylogeny_distances", split='train')
+dist_arc = load_dataset("tattabio/rpob_arch_dna_phylogeny_distances", split='train')
 
-# Create lookups for DNA and Protein
-dna_lookup = {
-    **{row['Entry']: row['Sequence'] for row in rpob_bac_seq_dna['train']},
-    **{row['Entry']: row['Sequence'] for row in rpob_arch_seq_dna['train']}
-}
+# 2. Maps
+dna_map = {clean_id(r['Entry']): r['Sequence'] for r in dna_bac}
+dna_map.update({clean_id(r['Entry']): r['Sequence'] for r in dna_arc})
+pro_map = {clean_id(r['Entry']): r['Sequence'] for r in pro_bac}
+pro_map.update({clean_id(r['Entry']): r['Sequence'] for r in pro_arc})
 
-pro_lookup = {
-    **{row['Entry']: row['Sequence'] for row in rpob_bac_seq_pro['train']},
-    **{row['Entry']: row['Sequence'] for row in rpob_arch_seq_pro['train']}
-}
+bac_ids = {clean_id(r['Entry']) for r in dna_bac}
+arc_ids = {clean_id(r['Entry']) for r in dna_arc}
 
-valid_ids = set(dna_lookup.keys())
+# 3. Split on organism IDs (same split for both so organisms never leak)
+common_ids = sorted(set(dna_map) & set(pro_map))
+train_ids, test_ids = train_test_split(common_ids, test_size=0.2, random_state=42)
+train_set, test_set = set(train_ids), set(test_ids)
+print(f"Organisms — train: {len(train_set)} | test: {len(test_set)}")
 
+# 4. Build SEPARATE dna and protein pair lists
+train_dna, test_dna = [], []
+train_pro, test_pro = [], []
 
-pairs_list = []
+for row in list(dist_bac) + list(dist_arc):
+    id1, id2 = clean_id(row['ID1']), clean_id(row['ID2'])
+    ptype = get_pair_type(id1, id2)
+    dist  = float(row['distance'])
 
-# Note: Access the ['train'] split specifically
-for row in dist['train']:
-    id1, id2 = row['ID1'], row['ID2']
-    
-    if id1 in valid_ids and id2 in valid_ids:
-        pairs_list.append({
-            'ID1': id1,
-            'ID2': id2,
-            'distance': row['distance'],
-            'dna_seq1': dna_lookup[id1],
-            'dna_seq2': dna_lookup[id2],
-            'pro_seq1': pro_lookup[id1],
-            'pro_seq2': pro_lookup[id2]
-        })
+    in_train = id1 in train_set and id2 in train_set
+    in_test  = id1 in test_set  and id2 in test_set
 
-# Create the real Pandas DataFrame
-df_master = pd.DataFrame(pairs_list)
+    if in_train or in_test:
+        target = (train_dna, train_pro) if in_train else (test_dna, test_pro)
 
-# Now line 33 will work perfectly!
-df_dna = df_master[['dna_seq1', 'dna_seq2', 'distance']].copy()
-df_pro = df_master[['pro_seq1', 'pro_seq2', 'distance']].copy()
+        if id1 in dna_map and id2 in dna_map:
+            target[0].append({'distance': dist, 'pair_type': ptype,
+                               'seq1': dna_map[id1], 'seq2': dna_map[id2]})
+        if id1 in pro_map and id2 in pro_map:
+            target[1].append({'distance': dist, 'pair_type': ptype,
+                               'seq1': pro_map[id1], 'seq2': pro_map[id2]})
 
+# 5. Report
+for name, data in [('train_dna', train_dna), ('test_dna',  test_dna),
+                   ('train_pro', train_pro), ('test_pro',  test_pro)]:
+    df = pd.DataFrame(data)
+    print(f"\n{name}: {len(df):,} pairs")
+    print(df['pair_type'].value_counts().to_string())
 
-print(f"Total valid pairs found: {len(df_master)}")
-
-# Split indices to keep the pairs identical across modalities
-train_idx, test_idx = train_test_split(
-    df_master.index, 
-    test_size=0.2, 
-    random_state=42
-)
-
-# Apply the same split to both dataframes
-train_dna = df_dna.loc[train_idx]
-test_dna = df_dna.loc[test_idx]
-
-train_pro = df_pro.loc[train_idx]
-test_pro = df_pro.loc[test_idx]
-
-print(f"Final training pairs: {len(train_dna)}")
-print(f"Final testing pairs: {len(test_dna)}")
+# 6. Save
+os.makedirs('data', exist_ok=True)
+pd.DataFrame(train_dna).to_parquet('data/train_dna.parquet')
+pd.DataFrame(test_dna) .to_parquet('data/test_dna.parquet')
+pd.DataFrame(train_pro).to_parquet('data/train_protein.parquet')
+pd.DataFrame(test_pro) .to_parquet('data/test_protein.parquet')
+print("\nSaved all four files.")
