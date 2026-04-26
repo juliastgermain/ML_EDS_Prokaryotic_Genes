@@ -6,6 +6,7 @@ import dgeb
 from dgeb.eval_utils import ForwardHook, pool
 from dgeb.models import BioSeqTransformer
 from dgeb.tasks.tasks import Modality
+from dgeb.tasks.eds_tasks import RpobBacPhylogeny, RpobArchPhylogeny
 
 # Based on ESM3 definition in DGEB
 class ESMC(BioSeqTransformer):
@@ -67,6 +68,6 @@ class ESMC(BioSeqTransformer):
 
 
 model = ESMC(model_name="esmc_600m")
-tasks = dgeb.get_tasks_by_modality(model.modality)
+tasks = [RpobBacPhylogeny, RpobArchPhylogeny]
 evaluation = dgeb.DGEB(tasks=tasks)
 evaluation.run(model)
